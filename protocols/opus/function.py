@@ -66,7 +66,7 @@ COLLATERAL: List[Dict[str, Union[str, int]]] = [
         "asset": "0x03fe2b97c1fd336e750087d68b9b867997fd64a2661ff3ca5a7c771641e8e7ac",
         "name": "Wrapped BTC",
         "symbol": "WBTC",
-        "decimals": 18,
+        "decimals": 8,
         "gate": "0x05bc1c8a78667fac3bf9617903dbf2c1bfe3937e1d37ada3d8b86bf70fb7926e",
     },
     {
@@ -105,13 +105,15 @@ COLLATERAL: List[Dict[str, Union[str, int]]] = [
         "gate": "0x06d44c6172f6b68fda893348d33be58b69f0add83ed480d1192d19bc4188c8f6",
     },
     {
-        "asset": "0x075afe6402ad5a5c20dd25e10ec3b3986a0x0124aeb495b947201f5fac96fd1138e326ad86195b98df6dec9009158a533b49caa647b77e4ae24b0cbc9a54a27a87",
+        "asset": "0x0124aeb495b947201f5fac96fd1138e326ad86195b98df6dec9009158a533b49",
         "name": "Lords",
         "symbol": "LORDS",
         "decimals": 18,
         "gate": "0x020c0fbc1f2a724a94ebe3575e54c4111fa3eaaf3dac938cfcbd96cc83317bbf",
     },
 ]
+
+NYBBTC_PAIR_IDS: Dict[str, int] = {"WBTC": 6287680677296296772}
 
 
 async def get_collateral_info(
@@ -141,6 +143,51 @@ async def get_collateral_info(
         "block_height": block,
         "lending_index_rate": 1,
     }
+
+
+async def get_nyybtc_info(
+    provider: FullNodeClient,
+    block: int,
+    date: str,
+    collateral_infos: List[Dict[str, Union[str, int, float]]],
+) -> Dict[str, Union[str, int, float]]:
+    pragma = Contract(
+        provider=provider, abi=PRAGMA_ABI, address=PRAGMA, cairo_version=1
+    )
+
+    nybbtc_value = 0
+
+    for collateral_info in collateral_infos:
+        token_symbol = collateral_info["tokenSymbol"]
+        nybbtc_pair_id = NYBBTC_PAIR_IDS.get(token_symbol)
+
+        if nybbtc_pair_id is not None:
+            pragma = Contract(
+                provider=provider,
+                abi=PRAGMA_ABI,
+                address=PRAGMA,
+                cairo_version=1,
+            )
+            (pragma_res,) = await pragma.functions["get_data_median"].call(
+                {"SpotEntry": nybbtc_pair_id}, block_number=block
+            )
+            pragma_price = pragma_res["price"] / 10 ** pragma_res["decimals"]
+            nybbtc_value = collateral_info["supply_token"] * pragma_price
+
+    return [
+        {
+            "protocol": "Opus",
+            "date": date,
+            "market": "0x0nybbtc",
+            "tokenSymbol": "NYBBTC",
+            "supply_token": nybbtc_value,
+            "borrow_token": 0,
+            "net_supply_token": nybbtc_value,
+            "non_recursive_supply_token": nybbtc_value,
+            "block_height": block,
+            "lending_index_rate": 1,
+        }
+    ]
 
 
 def x128_to_decimal(val: int, decimals: int) -> float:
@@ -184,14 +231,13 @@ async def get_median_cash_price(provider: FullNodeClient, block: int) -> float:
             int(token, 16),
             block_timestamp - TWAP_DURATION,
             block_timestamp,
-            block_number=block
+            block_number=block,
         )
         quote_price = x128_to_decimal(quote_price_x128, decimals)
 
         # multiply quote price with QUOTE/USD price from Pragma
         (pragma_res,) = await pragma.functions["get_data_median"].call(
-            {"SpotEntry": pair_id},
-            block_number=block
+            {"SpotEntry": pair_id}, block_number=block
         )
         pragma_price = pragma_res["price"] / 10 ** pragma_res["decimals"]
         price = quote_price * pragma_price
@@ -252,6 +298,7 @@ async def main():
         await get_collateral_info(provider, collateral_info, block, today)
         for collateral_info in COLLATERAL
     ]
+    res += await get_nyybtc_info(provider, block, today, res)
     res += await get_stables_info(provider, block, today)
     df = pd.DataFrame(res)
     print(df)
