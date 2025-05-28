@@ -114,6 +114,7 @@ COLLATERAL: List[Dict[str, Union[str, int]]] = [
 ]
 
 NYBBTC_PAIR_IDS: Dict[str, int] = {"WBTC": 6287680677296296772}
+BTC_PAIR_ID: int = 18669995996566340
 
 
 async def get_collateral_info(
@@ -157,6 +158,7 @@ async def get_nyybtc_info(
 
     nybbtc_value = 0
 
+    # Sum up USD value for each BTC variant
     for collateral_info in collateral_infos:
         token_symbol = collateral_info["tokenSymbol"]
         nybbtc_pair_id = NYBBTC_PAIR_IDS.get(token_symbol)
@@ -174,16 +176,23 @@ async def get_nyybtc_info(
             pragma_price = pragma_res["price"] / 10 ** pragma_res["decimals"]
             nybbtc_value = collateral_info["supply_token"] * pragma_price
 
+    # Divide by BTC/USD price to get BTC denominated value
+    (btc_res,) = await pragma.functions["get_data_median"].call(
+        {"SpotEntry": BTC_PAIR_ID}, block_number=block
+    )
+    btc_price = btc_res["price"] / 10 ** btc_res["decimals"]
+    nybbtc_amount = nybbtc_value / btc_price
+
     return [
         {
             "protocol": "Opus",
             "date": date,
             "market": "0x0nybbtc",
             "tokenSymbol": "NYBBTC",
-            "supply_token": nybbtc_value,
+            "supply_token": nybbtc_amount,
             "borrow_token": 0,
-            "net_supply_token": nybbtc_value,
-            "non_recursive_supply_token": nybbtc_value,
+            "net_supply_token": nybbtc_amount,
+            "non_recursive_supply_token": nybbtc_amount,
             "block_height": block,
             "lending_index_rate": 1,
         }
