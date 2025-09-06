@@ -135,9 +135,20 @@ async def main():
         )
         * eth_price
     )
+    wbtc_price = (
+        normalize(
+            await get_pragma_price(
+                "0x683852789848dea686fcfb66aaebf6477d83b25d8894aae73b15ff19b765bf0",
+                "0x03fe2b97c1fd336e750087d68b9b867997fd64a2661ff3ca5a7c771641e8e7ac",
+            ),
+            18,
+        )
+        * eth_price
+    )
 
     coroutines = [get_data(asset) for asset in ASSETS] + [
-        get_stables_data(dai_price, usdc_price, usdt_price, uno_price)
+        get_stables_data(dai_price, usdc_price, usdt_price, uno_price),
+        get_nybbtc_data(wbtc_price),
     ]
     individual_results = await asyncio.gather(*coroutines)
 
@@ -145,29 +156,52 @@ async def main():
     df = pd.DataFrame(individual_results)
 
     # Prices mapping
-    prices = {
+    stablecoin_prices = {
         "DAI_V0": dai_price,
         "DAI": dai_price,
         "USDC": usdc_price,
         "USDT": usdt_price,
         "UNO": uno_price,
     }
+    btc_prices = {
+        "WBTC": wbtc_price,
+    }
 
     # Calculate the sums directly, factoring in the prices
-    supply_token_sum = sum(
+    stablecoin_supply_token_sum = sum(
         df.loc[df["tokenSymbol"] == symbol, "supply_token"].iloc[0] * price
-        for symbol, price in prices.items()
+        for symbol, price in stablecoin_prices.items()
     )
-    borrow_token_sum = sum(
+    stablecoin_borrow_token_sum = sum(
         df.loc[df["tokenSymbol"] == symbol, "borrow_token"].iloc[0] * price
-        for symbol, price in prices.items()
+        for symbol, price in stablecoin_prices.items()
     )
-    net_supply_token_sum = supply_token_sum - borrow_token_sum
+    stablecoin_net_supply_token_sum = (
+        stablecoin_supply_token_sum - stablecoin_borrow_token_sum
+    )
+
+    # Calculate the sums directly
+    btc_supply_token_sum = sum(
+        df.loc[df["tokenSymbol"] == symbol, "supply_token"].iloc[0]
+        for symbol in btc_prices
+    )
+    btc_borrow_token_sum = sum(
+        df.loc[df["tokenSymbol"] == symbol, "borrow_token"].iloc[0]
+        for symbol in btc_prices
+    )
+    btc_net_supply_token_sum = btc_supply_token_sum - btc_borrow_token_sum
 
     # Update the 0x0stable/STB row
-    df.loc[df["tokenSymbol"] == "STB", "supply_token"] = supply_token_sum
-    df.loc[df["tokenSymbol"] == "STB", "borrow_token"] = borrow_token_sum
-    df.loc[df["tokenSymbol"] == "STB", "net_supply_token"] = net_supply_token_sum
+    df.loc[df["tokenSymbol"] == "STB", "supply_token"] = stablecoin_supply_token_sum
+    df.loc[df["tokenSymbol"] == "STB", "borrow_token"] = stablecoin_borrow_token_sum
+    df.loc[df["tokenSymbol"] == "STB", "net_supply_token"] = (
+        stablecoin_net_supply_token_sum
+    )
+
+    # Update the 0x0nybbtc/NYBBTC row
+    df.loc[df["tokenSymbol"] == "NYBBTC", "supply_token"] = btc_supply_token_sum
+    df.loc[df["tokenSymbol"] == "NYBBTC", "borrow_token"] = btc_borrow_token_sum
+    df.loc[df["tokenSymbol"] == "NYBBTC", "net_supply_token"] = btc_net_supply_token_sum
 
     return df
     # Write the updated DataFrame to a CSV
@@ -307,6 +341,184 @@ async def aggregate_stablecoins_non_recursive_supply():
     if response.status_code == 200:
         data = response.json()["documents"][0]
         return round(float(data["total_non_recursive_supply"]["$numberDecimal"]))
+    else:
+        print(f"Error: {response.status_code}")
+        raise Exception(f"Error: {response.status_code}")
+
+
+async def get_nybbtc_data(wbtc_price):
+    block_height = await client.get_block_number()
+    wbtc_index = normalize(
+        await get_index(
+            "0x0735d0f09a4e8bf8a17005fa35061b5957dcaa56889fc75df9e94530ff6991ea",
+            block_height,
+        ),
+        18,
+    )
+
+    nybbtc_non_recursive_supply = normalize(
+        await aggregate_nybbtc_non_recursive_supply(
+            ASSETS,
+            wbtc_index,
+            wbtc_price,
+        ),
+        18,
+    )
+
+    return {
+        "protocol": "Nostra",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "market": "0x0nybbtc",
+        "tokenSymbol": "NYBBTC",
+        "block_height": block_height,
+        "supply_token": 0,
+        "borrow_token": 0,
+        "net_supply_token": 0,
+        "non_recursive_supply_token": nybbtc_non_recursive_supply,
+        "lending_index_rate": 1.0,
+    }
+
+
+async def aggregate_nybbtc_non_recursive_supply(
+    assets,
+    wbtc_index,
+    wbtc_price,
+):
+    QUERY_ENDPOINT = "https://us-east-2.aws.data.mongodb-api.com/app/data-yqlpb/endpoint/data/v1/action/aggregate"
+    DATA_SOURCE = "nostra-production"
+    DB = "prod-a-nostra-db"
+    COLLECTION = "balances"
+
+    nybbtc_addresses = {
+        "WBTC": {
+            "i_token": "0x0735d0f09a4e8bf8a17005fa35061b5957dcaa56889fc75df9e94530ff6991ea",
+            "i_token_c": "0x05b7d301fa769274f20e89222169c0fad4d846c366440afc160aafadd6f88f0c",
+            "d_token": "0x0491480f21299223b9ce770f23a2c383437f9fbf57abc2ac952e9af8cdb12c97",
+        }
+    }
+
+    # Flatten the addresses to a single list for the $in query operator
+    token_addresses = [
+        address for asset in nybbtc_addresses.values() for address in asset.values()
+    ]
+
+    pipeline = [
+        {"$match": {"tokenAddress": {"$in": token_addresses}}},
+        {
+            "$addFields": {
+                "wbtc_index": {"$toDecimal": wbtc_index},
+                "wbtc_price": {"$toDecimal": wbtc_price},
+            }
+        },
+        {
+            "$addFields": {
+                "supplyType": {
+                    "$switch": {
+                        "branches": [
+                            {
+                                "case": {
+                                    "$in": [
+                                        "$tokenAddress",
+                                        [
+                                            nybbtc_addresses["WBTC"]["i_token"],
+                                        ],
+                                    ]
+                                },
+                                "then": "i_token",
+                            },
+                            {
+                                "case": {
+                                    "$in": [
+                                        "$tokenAddress",
+                                        [
+                                            nybbtc_addresses["WBTC"]["i_token_c"],
+                                        ],
+                                    ]
+                                },
+                                "then": "i_token_c",
+                            },
+                        ],
+                        "default": "d_token",
+                    }
+                },
+                "normalizedBalance": {
+                    "$multiply": [
+                        {"$toDecimal": "$balanceWithoutIndex"},
+                        "$wbtc_index",
+                        "$wbtc_price",
+                        1e10,
+                    ]
+                },
+            }
+        },
+        {
+            "$group": {
+                "_id": "$accountAddress",
+                "i_token_sum": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": ["$supplyType", "i_token"]},
+                            "$normalizedBalance",
+                            0,
+                        ]
+                    }
+                },
+                "i_token_c_sum": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": ["$supplyType", "i_token_c"]},
+                            "$normalizedBalance",
+                            0,
+                        ]
+                    }
+                },
+                "d_token_sum": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": ["$supplyType", "d_token"]},
+                            "$normalizedBalance",
+                            0,
+                        ]
+                    }
+                },
+            }
+        },
+        {
+            "$addFields": {
+                "non_recursive_supply": {
+                    "$max": [
+                        0,
+                        {
+                            "$subtract": [
+                                {"$add": ["$i_token_sum", "$i_token_c_sum"]},
+                                "$d_token_sum",
+                            ]
+                        },
+                    ]
+                }
+            }
+        },
+        {
+            "$group": {
+                "_id": None,
+                "total_non_recursive_supply": {"$sum": "$non_recursive_supply"},
+            }
+        },
+    ]
+
+    response = requests.post(
+        QUERY_ENDPOINT,
+        json={
+            "dataSource": DATA_SOURCE,
+            "database": DB,
+            "collection": COLLECTION,
+            "pipeline": pipeline,
+        },
+    )
+
+    if response.status_code == 200:
+        data = response.json()["documents"][0]
+        return round(float(data["total_non_recursive_supply"]))
     else:
         print(f"Error: {response.status_code}")
         raise Exception(f"Error: {response.status_code}")
